@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bose Support - Photo Upload</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #111;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .header {
+            width: 100%;
+            padding: 24px 20px;
+            text-align: center;
+            border-bottom: 1px solid #333;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+        }
+
+        .header p {
+            color: #C8A96E;
+            font-size: 13px;
+            letter-spacing: 2px;
+            margin-top: 4px;
+            text-transform: uppercase;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 480px;
+            padding: 24px 20px;
+            flex: 1;
+        }
+
+        .instructions {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 24px;
+        }
+
+        .instructions h2 {
+            font-size: 16px;
+            margin-bottom: 12px;
+            color: #C8A96E;
+        }
+
+        .instructions p {
+            font-size: 14px;
+            color: #aaa;
+            line-height: 1.5;
+        }
+
+        .upload-area {
+            border: 2px dashed #444;
+            border-radius: 12px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+            margin-bottom: 20px;
+        }
+
+        .upload-area:hover, .upload-area.dragover {
+            border-color: #C8A96E;
+            background: rgba(200, 169, 110, 0.05);
+        }
+
+        .upload-area svg {
+            width: 48px;
+            height: 48px;
+            fill: #C8A96E;
+            margin-bottom: 12px;
+        }
+
+        .upload-area p {
+            color: #aaa;
+            font-size: 14px;
+        }
+
+        .upload-area .cta {
+            color: #C8A96E;
+            font-weight: 600;
+            font-size: 16px;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        #file-input { display: none; }
+
+        .previews {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .preview-item {
+            position: relative;
+            border-radius: 8px;
+            overflow: hidden;
+            aspect-ratio: 1;
+            background: #222;
+        }
+
+        .preview-item img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .preview-item .remove {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            border: none;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            cursor: pointer;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-upload {
+            width: 100%;
+            padding: 16px;
+            background: #C8A96E;
+            color: #111;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            transition: opacity 0.2s;
+        }
+
+        .btn-upload:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .btn-upload:hover:not(:disabled) {
+            opacity: 0.9;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 4px;
+            background: #333;
+            border-radius: 2px;
+            margin-top: 16px;
+            overflow: hidden;
+            display: none;
+        }
+
+        .progress-bar .fill {
+            height: 100%;
+            background: #C8A96E;
+            width: 0%;
+            transition: width 0.3s;
+            border-radius: 2px;
+        }
+
+        .status {
+            text-align: center;
+            margin-top: 16px;
+            font-size: 14px;
+            color: #aaa;
+        }
+
+        .success-message {
+            display: none;
+            text-align: center;
+            padding: 40px 20px;
+        }
+
+        .success-message svg {
+            width: 64px;
+            height: 64px;
+            fill: #4CAF50;
+            margin-bottom: 16px;
+        }
+
+        .success-message h2 {
+            font-size: 22px;
+            margin-bottom: 8px;
+        }
+
+        .success-message p {
+            color: #aaa;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Bose</h1>
+        <p>Product Support</p>
+    </div>
+
+    <div class="container" id="upload-form">
+        <div class="instructions">
+            <h2>Upload Photos of Your Device</h2>
+            <p>Please upload a <strong>front photo</strong> and a <strong>side photo</strong> of your Bose device. This helps us identify the product and any visible issues for faster troubleshooting.</p>
+        </div>
+
+        <div class="upload-area" id="drop-zone">
+            <svg viewBox="0 0 24 24"><path d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+            <span class="cta">Tap to select photos</span>
+            <p>or drag and drop images here</p>
+        </div>
+
+        <input type="file" id="file-input" accept="image/*" multiple>
+
+        <div class="previews" id="previews"></div>
+
+        <button class="btn-upload" id="btn-upload" disabled>Upload Photos</button>
+
+        <div class="progress-bar" id="progress-bar">
+            <div class="fill" id="progress-fill"></div>
+        </div>
+
+        <div class="status" id="status"></div>
+    </div>
+
+    <div class="success-message" id="success-message">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+        <h2>Photos Uploaded!</h2>
+        <p>Your photos have been received. Please return to your phone call — our agent will now analyze your device and provide troubleshooting steps.</p>
+    </div>
+
+    <script>
+        const sessionId = "{{SESSION_ID}}";
+        const dropZone = document.getElementById("drop-zone");
+        const fileInput = document.getElementById("file-input");
+        const previews = document.getElementById("previews");
+        const btnUpload = document.getElementById("btn-upload");
+        const progressBar = document.getElementById("progress-bar");
+        const progressFill = document.getElementById("progress-fill");
+        const statusEl = document.getElementById("status");
+        let selectedFiles = [];
+
+        dropZone.addEventListener("click", () => fileInput.click());
+
+        dropZone.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            dropZone.classList.add("dragover");
+        });
+
+        dropZone.addEventListener("dragleave", () => {
+            dropZone.classList.remove("dragover");
+        });
+
+        dropZone.addEventListener("drop", (e) => {
+            e.preventDefault();
+            dropZone.classList.remove("dragover");
+            handleFiles(e.dataTransfer.files);
+        });
+
+        fileInput.addEventListener("change", () => {
+            handleFiles(fileInput.files);
+        });
+
+        function handleFiles(files) {
+            for (const file of files) {
+                if (file.type.startsWith("image/")) {
+                    selectedFiles.push(file);
+                    addPreview(file, selectedFiles.length - 1);
+                }
+            }
+            btnUpload.disabled = selectedFiles.length === 0;
+        }
+
+        function addPreview(file, index) {
+            const div = document.createElement("div");
+            div.className = "preview-item";
+            div.dataset.index = index;
+
+            const img = document.createElement("img");
+            const reader = new FileReader();
+            reader.onload = (e) => { img.src = e.target.result; };
+            reader.readAsDataURL(file);
+
+            const btn = document.createElement("button");
+            btn.className = "remove";
+            btn.textContent = "\u00d7";
+            btn.onclick = () => {
+                selectedFiles[index] = null;
+                div.remove();
+                btnUpload.disabled = selectedFiles.filter(Boolean).length === 0;
+            };
+
+            div.appendChild(img);
+            div.appendChild(btn);
+            previews.appendChild(div);
+        }
+
+        btnUpload.addEventListener("click", async () => {
+            const files = selectedFiles.filter(Boolean);
+            if (files.length === 0) return;
+
+            btnUpload.disabled = true;
+            progressBar.style.display = "block";
+            statusEl.textContent = "Uploading...";
+
+            const formData = new FormData();
+            files.forEach(f => formData.append("files", f));
+
+            try {
+                progressFill.style.width = "30%";
+
+                const res = await fetch(`/upload/${sessionId}`, {
+                    method: "POST",
+                    body: formData
+                });
+
+                progressFill.style.width = "100%";
+
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById("upload-form").style.display = "none";
+                    document.getElementById("success-message").style.display = "block";
+                } else {
+                    const err = await res.json();
+                    statusEl.textContent = "Upload failed: " + (err.detail || "Unknown error");
+                    btnUpload.disabled = false;
+                }
+            } catch (e) {
+                statusEl.textContent = "Upload failed. Please try again.";
+                btnUpload.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
