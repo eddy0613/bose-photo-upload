@@ -320,12 +320,15 @@ async def analyse_photos(session_id: str):
     for filename in photo_files:
         try:
             data = _read_bytes(session_id, filename)
+            logger.info("Read %d bytes for %s (session %s)", len(data), filename, session_id)
             img = Image.open(io.BytesIO(data))
+            img.load()  # Force full decode so BytesIO buffer can be released
             images.append(img)
         except Exception as e:
             logger.warning("Could not open image %s: %s", filename, e)
 
     if not images:
+        logger.error("No images could be loaded for session %s (files: %s)", session_id, photo_files)
         raise HTTPException(status_code=400, detail="Could not process uploaded images")
 
     logger.info("Analysing %d photo(s) for session %s", len(images), session_id)
@@ -423,24 +426,32 @@ async def analyse_photos(session_id: str):
             )
             fallback_response = model.generate_content([fallback_prompt] + images)
             utterance = fallback_response.text.strip()
+            logger.info("Fallback analysis succeeded for session %s", session_id)
+            return {
+                "success": True,
+                "product_id": matched_product["id"] if matched_product else None,
+                "product_name": matched_product["name"] if matched_product else None,
+                "mapping_confidence": "fuzzy" if matched_product else "none",
+                "visible_issues": [],
+                "troubleshooting_steps": [],
+                "utterance": utterance,
+                "analysis": utterance,
+                "photos_analysed": len(images),
+            }
         except Exception as e2:
             logger.error("Fallback also failed: %s", e2)
-            utterance = (
-                "I wasn't able to fully analyse the photos right now. "
-                "Could you describe the specific issue you're experiencing with your Bose product?"
-            )
-
-        return {
-            "success": True,
-            "product_id": matched_product["id"] if matched_product else None,
-            "product_name": matched_product["name"] if matched_product else None,
-            "mapping_confidence": "fuzzy" if matched_product else "none",
-            "visible_issues": [],
-            "troubleshooting_steps": [],
-            "utterance": utterance,
-            "analysis": utterance,
-            "photos_analysed": len(images),
-        }
+            return {
+                "success": False,
+                "product_id": matched_product["id"] if matched_product else None,
+                "product_name": matched_product["name"] if matched_product else None,
+                "mapping_confidence": "none",
+                "visible_issues": [],
+                "troubleshooting_steps": [],
+                "utterance": None,
+                "analysis": None,
+                "photos_analysed": len(images),
+                "error": f"Analysis failed: {e2}",
+            }
 
 
 @app.delete("/session/{session_id}")
