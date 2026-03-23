@@ -6,6 +6,9 @@ import logging
 from difflib import SequenceMatcher
 from pathlib import Path
 
+import io
+import boto3
+from botocore.exceptions import ClientError
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -25,10 +28,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# S3 persistent storage (preferred) — set S3_BUCKET env var on Railway
+S3_BUCKET = os.getenv("S3_BUCKET", "")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+# Local fallback (ephemeral on Railway — photos lost on restart)
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+
+def _use_s3() -> bool:
+    return bool(S3_BUCKET)
+
+
+def _s3():
+    return boto3.client("s3", region_name=AWS_REGION)
+
+
+def _s3_key(session_id: str, filename: str) -> str:
+    return f"bose-sessions/{session_id}/{filename}"
+
+
+def _save_bytes(session_id: str, filename: str, data: bytes):
+    if _use_s3():
+        _s3().put_object(Bucket=S3_BUCKET, Key=_s3_key(session_id, filename), Body=data)
+    else:
+        d = UPLOAD_DIR / session_id
+        d.mkdir(parents=True, exist_ok=True)
+        (d / filename).write_bytes(data)
+
+
+def _list_session_files(session_id: str) -> list[str]:
+    if _use_s3():
+        prefix = f"bose-sessions/{session_id}/"
+        resp = _s3().list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
+        return [obj["Key"].split("/")[-1] for obj in resp.get("Contents", [])]
+    else:
+        d = UPLOAD_DIR / session_id
+        if not d.exists():
+            return []
+        return [f.name for f in d.iterdir() if f.is_file()]
+
+
+def _read_bytes(session_id: str, filename: str) -> bytes:
+    if _use_s3():
+        obj = _s3().get_object(Bucket=S3_BUCKET, Key=_s3_key(session_id, filename))
+        return obj["Body"].read()
+    else:
+        return (UPLOAD_DIR / session_id / filename).read_bytes()
+
+
+def _delete_session(session_id: str):
+    if _use_s3():
+        prefix = f"bose-sessions/{session_id}/"
+        resp = _s3().list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
+        for obj in resp.get("Contents", []):
+            _s3().delete_object(Bucket=S3_BUCKET, Key=obj["Key"])
+    else:
+        d = UPLOAD_DIR / session_id
+        if d.exists():
+            shutil.rmtree(d)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -210,9 +271,6 @@ async def upload_page(session_id: str):
 
 @app.post("/upload/{session_id}")
 async def upload_photos(session_id: str, files: list[UploadFile] = File(...)):
-    session_dir = get_session_dir(session_id)
-    session_dir.mkdir(parents=True, exist_ok=True)
-
     saved = []
     for file in files:
         if not file.content_type or not file.content_type.startswith("image/"):
@@ -220,11 +278,10 @@ async def upload_photos(session_id: str, files: list[UploadFile] = File(...)):
             continue
         ext = Path(file.filename or "photo.jpg").suffix or ".jpg"
         safe_name = f"{uuid.uuid4().hex[:8]}{ext}"
-        file_path = session_dir / safe_name
-        content = await file.read()
-        file_path.write_bytes(content)
+        file_content = await file.read()
+        _save_bytes(session_id, safe_name, file_content)
         saved.append(safe_name)
-        logger.info("Saved photo %s for session %s", safe_name, session_id)
+        logger.info("Saved photo %s for session %s (s3=%s)", safe_name, session_id, _use_s3())
 
     if not saved:
         raise HTTPException(status_code=400, detail="No valid image files uploaded")
@@ -234,10 +291,10 @@ async def upload_photos(session_id: str, files: list[UploadFile] = File(...)):
 
 @app.get("/status/{session_id}")
 async def check_status(session_id: str):
-    session_dir = get_session_dir(session_id)
-    if not session_dir.exists():
-        return {"uploaded": False, "count": 0, "photos": []}
-    photos = [f.name for f in session_dir.iterdir() if f.is_file()]
+    try:
+        photos = _list_session_files(session_id)
+    except Exception:
+        photos = []
     return {"uploaded": len(photos) > 0, "count": len(photos), "photos": photos}
 
 
@@ -386,9 +443,10 @@ async def analyse_photos(session_id: str):
 
 @app.delete("/session/{session_id}")
 async def cleanup_session(session_id: str):
-    session_dir = get_session_dir(session_id)
-    if session_dir.exists():
-        shutil.rmtree(session_dir)
+    try:
+        _delete_session(session_id)
+    except Exception:
+        pass
     return {"success": True}
 
 
