@@ -5,3 +5,4 @@ google-generativeai
 pillow
 aiofiles
 jinja2
+boto3
