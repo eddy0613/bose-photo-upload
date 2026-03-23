@@ -304,24 +304,26 @@ async def analyse_photos(session_id: str):
     if not GOOGLE_API_KEY:
         raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
 
-    session_dir = get_session_dir(session_id)
-    if not session_dir.exists():
-        raise HTTPException(status_code=404, detail="No photos found for this session")
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid session ID")
 
-    photo_paths = [f for f in session_dir.iterdir() if f.is_file()]
-    if not photo_paths:
+    photo_files = _list_session_files(session_id)
+    if not photo_files:
         raise HTTPException(status_code=404, detail="No photos found for this session")
 
     genai.configure(api_key=GOOGLE_API_KEY)
     model = genai.GenerativeModel("gemini-2.0-flash")
 
     images = []
-    for path in photo_paths:
+    for filename in photo_files:
         try:
-            img = Image.open(path)
+            data = _read_bytes(session_id, filename)
+            img = Image.open(io.BytesIO(data))
             images.append(img)
         except Exception as e:
-            logger.warning("Could not open image %s: %s", path, e)
+            logger.warning("Could not open image %s: %s", filename, e)
 
     if not images:
         raise HTTPException(status_code=400, detail="Could not process uploaded images")
