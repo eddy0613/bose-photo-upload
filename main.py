@@ -7,12 +7,13 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 import io
+import base64
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-import google.generativeai as genai
+import anthropic
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +37,7 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads"))
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 
 def _use_s3() -> bool:
@@ -298,11 +299,50 @@ async def check_status(session_id: str):
     return {"uploaded": len(photos) > 0, "count": len(photos), "photos": photos}
 
 
+def _prepare_image_content(session_id: str, photo_files: list[str]) -> list[dict]:
+    """Read photos and convert to Claude vision content blocks."""
+    image_blocks = []
+    for filename in photo_files:
+        try:
+            data = _read_bytes(session_id, filename)
+            logger.info("Read %d bytes for %s (session %s)", len(data), filename, session_id)
+            # Validate it's a real image
+            img = Image.open(io.BytesIO(data))
+            img.load()
+            # Determine media type
+            fmt = (img.format or "JPEG").upper()
+            media_type_map = {"JPEG": "image/jpeg", "JPG": "image/jpeg", "PNG": "image/png",
+                              "GIF": "image/gif", "WEBP": "image/webp"}
+            media_type = media_type_map.get(fmt, "image/jpeg")
+            image_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": base64.standard_b64encode(data).decode("utf-8"),
+                },
+            })
+        except Exception as e:
+            logger.warning("Could not process image %s: %s", filename, e)
+    return image_blocks
+
+
+def _call_claude(client: anthropic.Anthropic, prompt: str, image_blocks: list[dict]) -> str:
+    """Call Claude with images and return the text response."""
+    content = image_blocks + [{"type": "text", "text": prompt}]
+    response = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": content}],
+    )
+    return response.content[0].text.strip()
+
+
 @app.post("/analyse/{session_id}")
 async def analyse_photos(session_id: str):
-    """Two-stage Gemini analysis: identify product → map to catalog → troubleshoot."""
-    if not GOOGLE_API_KEY:
-        raise HTTPException(status_code=500, detail="GOOGLE_API_KEY not configured")
+    """Two-stage Claude analysis: identify product → map to catalog → troubleshoot."""
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
 
     try:
         uuid.UUID(session_id)
@@ -313,25 +353,13 @@ async def analyse_photos(session_id: str):
     if not photo_files:
         raise HTTPException(status_code=404, detail="No photos found for this session")
 
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel("gemini-2.0-flash")
-
-    images = []
-    for filename in photo_files:
-        try:
-            data = _read_bytes(session_id, filename)
-            logger.info("Read %d bytes for %s (session %s)", len(data), filename, session_id)
-            img = Image.open(io.BytesIO(data))
-            img.load()  # Force full decode so BytesIO buffer can be released
-            images.append(img)
-        except Exception as e:
-            logger.warning("Could not open image %s: %s", filename, e)
-
-    if not images:
+    image_blocks = _prepare_image_content(session_id, photo_files)
+    if not image_blocks:
         logger.error("No images could be loaded for session %s (files: %s)", session_id, photo_files)
         raise HTTPException(status_code=400, detail="Could not process uploaded images")
 
-    logger.info("Analysing %d photo(s) for session %s", len(images), session_id)
+    logger.info("Analysing %d photo(s) for session %s", len(image_blocks), session_id)
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     # ------------------------------------------------------------------
     # Stage 1: Product identification
@@ -348,8 +376,7 @@ async def analyse_photos(session_id: str):
     stage1_result = {}
     matched_product = None
     try:
-        response1 = model.generate_content([stage1_prompt] + images)
-        raw = response1.text.strip()
+        raw = _call_claude(client, stage1_prompt, image_blocks)
         # Strip markdown code blocks if present
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -392,8 +419,7 @@ async def analyse_photos(session_id: str):
     )
 
     try:
-        response2 = model.generate_content([stage2_prompt] + images)
-        raw2 = response2.text.strip()
+        raw2 = _call_claude(client, stage2_prompt, image_blocks)
         if raw2.startswith("```"):
             raw2 = raw2.split("```")[1]
             if raw2.startswith("json"):
@@ -407,7 +433,7 @@ async def analyse_photos(session_id: str):
             if not result.get("mapping_confidence"):
                 result["mapping_confidence"] = "fuzzy"
 
-        result["photos_analysed"] = len(images)
+        result["photos_analysed"] = len(image_blocks)
         result["success"] = True
         # Backwards compat
         result["analysis"] = result.get("utterance", "")
@@ -424,8 +450,7 @@ async def analyse_photos(session_id: str):
                 "troubleshooting advice in 2-3 sentences suitable for reading aloud on a phone call."
                 + product_context
             )
-            fallback_response = model.generate_content([fallback_prompt] + images)
-            utterance = fallback_response.text.strip()
+            utterance = _call_claude(client, fallback_prompt, image_blocks)
             logger.info("Fallback analysis succeeded for session %s", session_id)
             return {
                 "success": True,
@@ -436,7 +461,7 @@ async def analyse_photos(session_id: str):
                 "troubleshooting_steps": [],
                 "utterance": utterance,
                 "analysis": utterance,
-                "photos_analysed": len(images),
+                "photos_analysed": len(image_blocks),
             }
         except Exception as e2:
             logger.error("Fallback also failed: %s", e2)
@@ -449,7 +474,7 @@ async def analyse_photos(session_id: str):
                 "troubleshooting_steps": [],
                 "utterance": None,
                 "analysis": None,
-                "photos_analysed": len(images),
+                "photos_analysed": len(image_blocks),
                 "error": f"Analysis failed: {e2}",
             }
 
