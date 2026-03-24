@@ -331,7 +331,7 @@ def _call_claude(client: anthropic.Anthropic, prompt: str, image_blocks: list[di
     """Call Claude with images and return the text response."""
     content = image_blocks + [{"type": "text", "text": prompt}]
     response = client.messages.create(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         max_tokens=1024,
         messages=[{"role": "user", "content": content}],
     )
