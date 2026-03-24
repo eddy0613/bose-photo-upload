@@ -331,7 +331,7 @@ def _call_claude(client: anthropic.Anthropic, prompt: str, image_blocks: list[di
     """Call Claude with images and return the text response."""
     content = image_blocks + [{"type": "text", "text": prompt}]
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5-20251001",
         max_tokens=1024,
         messages=[{"role": "user", "content": content}],
     )
@@ -340,7 +340,7 @@ def _call_claude(client: anthropic.Anthropic, prompt: str, image_blocks: list[di
 
 @app.post("/analyse/{session_id}")
 async def analyse_photos(session_id: str):
-    """Two-stage Claude analysis: identify product → map to catalog → troubleshoot."""
+    """Single-call Claude analysis: identify product + troubleshoot in one request."""
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
 
@@ -361,53 +361,18 @@ async def analyse_photos(session_id: str):
     logger.info("Analysing %d photo(s) for session %s", len(image_blocks), session_id)
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    # ------------------------------------------------------------------
-    # Stage 1: Product identification
-    # ------------------------------------------------------------------
-    stage1_prompt = (
-        "You are a Bose product expert. Look at these photos and identify the Bose product.\n\n"
+    # Build product catalog hint for better matching
+    product_hints = ", ".join(p["name"] for p in BOSE_PRODUCTS)
+
+    prompt = (
+        "You are a Bose product support expert analysing photos of a customer's device for a phone support call.\n\n"
+        f"Known Bose products: {product_hints}\n\n"
+        "Look at the photos, identify the Bose product, and provide troubleshooting advice.\n\n"
         "Respond ONLY with valid JSON in this exact format:\n"
-        '{"identified_product": "<what you see, e.g. QuietComfort 45 headphones>", '
-        '"confidence": "<high|medium|low>", '
-        '"visual_cues": ["<cue 1>", "<cue 2>"]}\n\n'
-        "If you cannot identify a Bose product, set identified_product to null and confidence to low."
-    )
-
-    stage1_result = {}
-    matched_product = None
-    try:
-        raw = _call_claude(client, stage1_prompt, image_blocks)
-        # Strip markdown code blocks if present
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        stage1_result = json.loads(raw.strip())
-        logger.info("Stage 1 result: %s", stage1_result)
-        matched_product = _match_product(stage1_result.get("identified_product") or "")
-        if matched_product:
-            logger.info("Matched product: %s (id=%s)", matched_product["name"], matched_product["id"])
-    except Exception as e:
-        logger.warning("Stage 1 failed, falling back to unstructured: %s", e)
-
-    # ------------------------------------------------------------------
-    # Stage 2: Troubleshooting with product context
-    # ------------------------------------------------------------------
-    product_context = ""
-    if matched_product:
-        product_context = (
-            f"\n\nThe product has been identified as: {matched_product['name']} "
-            f"(category: {matched_product['category']}).\n"
-            f"Common known issues for this product: {', '.join(matched_product['common_issues'])}.\n"
-            "Focus your analysis on these known issues where visible."
-        )
-
-    stage2_prompt = (
-        "You are a Bose product support expert analysing photos of a customer's device for a phone support call.\n"
-        + product_context
-        + "\n\nAnalyse the photos and respond ONLY with valid JSON in this exact format:\n"
         '{\n'
-        '  "product_id": "<matched product id or null>",\n'
+        '  "identified_product": "<product name you see, e.g. QuietComfort 45>",\n'
+        '  "confidence": "<high|medium|low>",\n'
+        '  "product_id": "<product id or null>",\n'
         '  "product_name": "<full product name or null>",\n'
         '  "mapping_confidence": "<exact|fuzzy|none>",\n'
         '  "visible_issues": ["<issue 1>", "<issue 2>"],\n'
@@ -415,48 +380,49 @@ async def analyse_photos(session_id: str):
         '  "utterance": "<conversational response suitable for reading aloud on a phone call. '
         'Be specific about button locations, port names, LED colors. Max 3-4 sentences.>"\n'
         '}\n\n'
-        "If no visible issues are found, provide general maintenance/setup tips for the product."
+        "If no visible issues are found, provide general maintenance/setup tips for the product.\n"
+        "If you cannot identify a Bose product, set identified_product to null and confidence to low."
     )
 
     try:
-        raw2 = _call_claude(client, stage2_prompt, image_blocks)
-        if raw2.startswith("```"):
-            raw2 = raw2.split("```")[1]
-            if raw2.startswith("json"):
-                raw2 = raw2[4:]
-        result = json.loads(raw2.strip())
+        raw = _call_claude(client, prompt, image_blocks)
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        result = json.loads(raw.strip())
 
-        # Override product fields from our catalog match if available
+        # Match against catalog
+        matched_product = _match_product(result.get("identified_product") or "")
         if matched_product:
             result["product_id"] = matched_product["id"]
             result["product_name"] = matched_product["name"]
             if not result.get("mapping_confidence"):
-                result["mapping_confidence"] = "fuzzy"
+                result["mapping_confidence"] = "exact"
+            logger.info("Matched product: %s (id=%s)", matched_product["name"], matched_product["id"])
 
         result["photos_analysed"] = len(image_blocks)
         result["success"] = True
-        # Backwards compat
         result["analysis"] = result.get("utterance", "")
 
         logger.info("Analysis complete for session %s: product=%s", session_id, result.get("product_id"))
         return result
 
     except Exception as e:
-        logger.error("Stage 2 failed: %s", e)
-        # Last resort: unstructured fallback
+        logger.error("Analysis failed: %s", e)
+        # Fallback: simpler prompt
         try:
             fallback_prompt = (
                 "You are a Bose product support expert. Analyse these photos and provide "
                 "troubleshooting advice in 2-3 sentences suitable for reading aloud on a phone call."
-                + product_context
             )
             utterance = _call_claude(client, fallback_prompt, image_blocks)
             logger.info("Fallback analysis succeeded for session %s", session_id)
             return {
                 "success": True,
-                "product_id": matched_product["id"] if matched_product else None,
-                "product_name": matched_product["name"] if matched_product else None,
-                "mapping_confidence": "fuzzy" if matched_product else "none",
+                "product_id": None,
+                "product_name": None,
+                "mapping_confidence": "none",
                 "visible_issues": [],
                 "troubleshooting_steps": [],
                 "utterance": utterance,
@@ -467,8 +433,8 @@ async def analyse_photos(session_id: str):
             logger.error("Fallback also failed: %s", e2)
             return {
                 "success": False,
-                "product_id": matched_product["id"] if matched_product else None,
-                "product_name": matched_product["name"] if matched_product else None,
+                "product_id": None,
+                "product_name": None,
                 "mapping_confidence": "none",
                 "visible_issues": [],
                 "troubleshooting_steps": [],
